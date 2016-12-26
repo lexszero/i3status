@@ -1,3 +1,5 @@
+TOPDIR=$(shell pwd)
+
 ifndef PREFIX
   PREFIX=/usr
 endif
@@ -21,7 +23,7 @@ CFLAGS+=-g
 CFLAGS+=-std=gnu99
 CFLAGS+=-pedantic
 CPPFLAGS+=-DSYSCONFDIR=\"$(SYSCONFDIR)\"
-CPPFLAGS+=-DVERSION=\"${GIT_VERSION}\"
+CPPFLAGS+=-DVERSION=\"${I3STATUS_VERSION}\"
 CFLAGS+=-Iinclude
 LIBS+=-lconfuse
 LIBS+=-lyajl
@@ -30,14 +32,24 @@ LIBS+=-lpulse
 CFLAGS+=-DWITH_PULSEAUDIO
 endif
 
-VERSION:=$(shell git describe --tags --abbrev=0)
-GIT_VERSION:="$(shell git describe --tags --always) ($(shell git log --pretty=format:%cd --date=short -n1))"
+LIBS+=-lm
+LIBS+=-lpthread
+
+ifeq ($(wildcard .git),)
+  # not in git repository
+  VERSION := $(shell [ -f $(TOPDIR)/I3STATUS_VERSION ] && cat $(TOPDIR)/I3STATUS_VERSION | cut -d '-' -f 1)
+  I3STATUS_VERSION := '$(shell [ -f $(TOPDIR)/I3STATUS_VERSION ] && cat $(TOPDIR)/I3STATUS_VERSION)'
+else
+  VERSION:=$(shell git describe --tags --abbrev=0)
+  I3STATUS_VERSION:="$(shell git describe --tags --always) ($(shell git log --pretty=format:%cd --date=short -n1))"
+endif
 OS:=$(shell uname)
 
 ifeq ($(OS),Linux)
 CPPFLAGS+=-DLINUX
 CPPFLAGS+=-D_GNU_SOURCE
-LIBS+=-liw
+CFLAGS += $(shell pkg-config --cflags libnl-genl-3.0)
+LIBS += $(shell pkg-config --libs libnl-genl-3.0)
 LIBS+=-lasound
 endif
 
@@ -48,10 +60,6 @@ endif
 ifneq (, $(filter $(OS), DragonFly FreeBSD OpenBSD))
 CFLAGS+=-I/usr/local/include/
 LDFLAGS+=-L/usr/local/lib/
-endif
-
-ifeq ($(OS),OpenBSD)
-LIBS+=-lossaudio
 endif
 
 ifeq ($(OS),NetBSD)
@@ -78,6 +86,11 @@ CFLAGS += -idirafter yajl-fallback
 
 OBJS:=$(wildcard src/*.c *.c)
 OBJS:=$(OBJS:.c=.o)
+
+ifeq ($(OS),OpenBSD)
+OBJS:=$(filter-out src/pulse.o, $(OBJS))
+LIBS:=$(filter-out -lpulse, $(LIBS))
+endif
 
 src/%.o: src/%.c include/i3status.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
@@ -115,7 +128,7 @@ install:
 release:
 	[ -f i3status-${VERSION} ] || rm -rf i3status-${VERSION}
 	mkdir i3status-${VERSION}
-	find . -maxdepth 1 -type f \( -regex ".*\.\(c\|conf\|h\)" -or -name "README" -or -name "Makefile" -or -name "LICENSE" -or -name "CHANGELOG" \) -exec cp '{}' i3status-${VERSION} \;
+	find . -maxdepth 1 -type f \( -regex ".*\.\(c\|conf\|h\)" -or -name "README.md" -or -name "Makefile" -or -name "LICENSE" -or -name "CHANGELOG" \) -exec cp '{}' i3status-${VERSION} \;
 	mkdir i3status-${VERSION}/src
 	mkdir i3status-${VERSION}/man
 	find src -maxdepth 1 -type f \( -regex ".*\.\(c\|h\)" \) -exec cp '{}' i3status-${VERSION}/src \;
@@ -123,6 +136,6 @@ release:
 	cp -r include i3status-${VERSION}
 	cp -r yajl-fallback i3status-${VERSION}
 	cp -r contrib i3status-${VERSION}
-	sed -e 's/^GIT_VERSION:=\(.*\)/GIT_VERSION=${GIT_VERSION}/g;s/^VERSION:=\(.*\)/VERSION=${VERSION}/g' Makefile > i3status-${VERSION}/Makefile
+	sed -e 's/^I3STATUS_VERSION:=\(.*\)/I3STATUS_VERSION=${I3STATUS_VERSION}/g;s/^VERSION:=\(.*\)/VERSION=${VERSION}/g' Makefile > i3status-${VERSION}/Makefile
 	tar cjf i3status-${VERSION}.tar.bz2 i3status-${VERSION}
 	rm -rf i3status-${VERSION}
