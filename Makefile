@@ -18,6 +18,7 @@ ifndef WITH_PULSEAUDIO
   WITH_PULSEAUDIO=yes
 endif
 
+PKG_CONFIG ?= pkg-config
 CFLAGS+=-Wall -Wshadow -Wpointer-arith -Wcast-qual -Wsign-compare
 CFLAGS+=-g
 CFLAGS+=-std=gnu99
@@ -48,8 +49,8 @@ OS:=$(shell uname)
 ifeq ($(OS),Linux)
 CPPFLAGS+=-DLINUX
 CPPFLAGS+=-D_GNU_SOURCE
-CFLAGS += $(shell pkg-config --cflags libnl-genl-3.0)
-LIBS += $(shell pkg-config --libs libnl-genl-3.0)
+CFLAGS += $(shell $(PKG_CONFIG) --cflags libnl-genl-3.0)
+LIBS += $(shell $(PKG_CONFIG) --libs libnl-genl-3.0)
 LIBS+=-lasound
 endif
 
@@ -92,6 +93,11 @@ OBJS:=$(filter-out src/pulse.o, $(OBJS))
 LIBS:=$(filter-out -lpulse, $(LIBS))
 endif
 
+ifeq ($(OS),DragonFly)
+OBJS:=$(filter-out src/pulse.o, $(OBJS))
+LIBS:=$(filter-out -lpulse, $(LIBS)) -lpthread
+endif
+
 src/%.o: src/%.c include/i3status.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 	@echo " CC $<"
@@ -105,6 +111,9 @@ all: i3status manpage
 i3status: ${OBJS}
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 	@echo " LD $@"
+
+test: i3status
+	LC_ALL=C ./travis/run-tests.pl
 
 clean:
 	rm -f *.o src/*.o
@@ -120,8 +129,6 @@ install:
 	install -m 755 -d $(DESTDIR)$(SYSCONFDIR)
 	install -m 755 -d $(DESTDIR)$(MANPREFIX)/share/man/man1
 	install -m 755 i3status $(DESTDIR)$(PREFIX)/bin/i3status
-	# Allow network configuration for getting the link speed
-	(which setcap && setcap cap_net_admin=ep $(DESTDIR)$(PREFIX)/bin/i3status) || true
 	install -m 644 i3status.conf $(DESTDIR)$(SYSCONFDIR)/i3status.conf
 	install -m 644 man/i3status.1 $(DESTDIR)$(MANPREFIX)/share/man/man1
 

@@ -11,6 +11,7 @@
 #ifdef LINUX
 #include <alsa/asoundlib.h>
 #include <alloca.h>
+#include <math.h>
 #endif
 
 #if defined(__FreeBSD__) || defined(__DragonFly__)
@@ -35,15 +36,17 @@ static char *apply_volume_format(const char *fmt, char *outwalk, int ivolume) {
     for (; *walk != '\0'; walk++) {
         if (*walk != '%') {
             *(outwalk++) = *walk;
-            continue;
-        }
-        if (BEGINS_WITH(walk + 1, "%")) {
+
+        } else if (BEGINS_WITH(walk + 1, "%")) {
             outwalk += sprintf(outwalk, "%s", pct_mark);
             walk += strlen("%");
-        }
-        if (BEGINS_WITH(walk + 1, "volume")) {
+
+        } else if (BEGINS_WITH(walk + 1, "volume")) {
             outwalk += sprintf(outwalk, "%d%s", ivolume, pct_mark);
             walk += strlen("volume");
+
+        } else {
+            *(outwalk++) = '%';
         }
     }
     return outwalk;
@@ -61,7 +64,7 @@ void print_volume(yajl_gen json_gen, char *buffer, const char *fmt, const char *
         free(instance);
     }
 
-#if !defined(__OpenBSD__) && defined(WITH_PULSEAUDIO)
+#if !defined(__DragonFly__) && !defined(__OpenBSD__) && defined(WITH_PULSEAUDIO)
     /* Try PulseAudio first */
 
     /* If the device name has the format "pulse[:N]" where N is the
@@ -109,11 +112,13 @@ void print_volume(yajl_gen json_gen, char *buffer, const char *fmt, const char *
 #endif
 
 #ifdef LINUX
+    const long MAX_LINEAR_DB_SCALE = 24;
     int err;
     snd_mixer_t *m;
     snd_mixer_selem_id_t *sid;
     snd_mixer_elem_t *elem;
     long min, max, val;
+    bool force_linear = false;
     int avg;
 
     if ((err = snd_mixer_open(&m, 0)) < 0) {
@@ -151,7 +156,7 @@ void print_volume(yajl_gen json_gen, char *buffer, const char *fmt, const char *
     snd_mixer_selem_id_set_index(sid, mixer_idx);
     snd_mixer_selem_id_set_name(sid, mixer);
     if (!(elem = snd_mixer_find_selem(m, sid))) {
-        fprintf(stderr, "i3status: ALSA: Cannot find mixer %s (index %i)\n",
+        fprintf(stderr, "i3status: ALSA: Cannot find mixer %s (index %u)\n",
                 snd_mixer_selem_id_get_name(sid), snd_mixer_selem_id_get_index(sid));
         snd_mixer_close(m);
         snd_mixer_selem_id_free(sid);
@@ -159,16 +164,34 @@ void print_volume(yajl_gen json_gen, char *buffer, const char *fmt, const char *
     }
 
     /* Get the volume range to convert the volume later */
-    snd_mixer_selem_get_playback_volume_range(elem, &min, &max);
-
     snd_mixer_handle_events(m);
-    snd_mixer_selem_get_playback_volume(elem, 0, &val);
-    if (max != 100) {
-        float avgf = ((float)val / max) * 100;
+    err = snd_mixer_selem_get_playback_dB_range(elem, &min, &max) ||
+          snd_mixer_selem_get_playback_dB(elem, 0, &val);
+    if (err != 0 || min >= max) {
+        err = snd_mixer_selem_get_playback_volume_range(elem, &min, &max) ||
+              snd_mixer_selem_get_playback_volume(elem, 0, &val);
+        force_linear = true;
+    }
+
+    if (err != 0) {
+        fprintf(stderr, "i3status: ALSA: Cannot get playback volume.\n");
+        goto out;
+    }
+
+    /* Use linear mapping for raw register values or small ranges of 24 dB */
+    if (force_linear || max - min <= MAX_LINEAR_DB_SCALE * 100) {
+        float avgf = ((float)(val - min) / (max - min)) * 100;
         avg = (int)avgf;
         avg = (avgf - avg < 0.5 ? avg : (avg + 1));
-    } else
-        avg = (int)val;
+    } else {
+        /* mapped volume to be more natural for the human ear */
+        double normalized = exp10((val - max) / 6000.0);
+        if (min != SND_CTL_TLV_DB_GAIN_MUTE) {
+            double min_norm = exp10((min - max) / 6000.0);
+            normalized = (normalized - min_norm) / (1 - min_norm);
+        }
+        avg = lround(normalized * 100);
+    }
 
     /* Check for mute */
     if (snd_mixer_selem_has_playback_switch(elem)) {
@@ -211,6 +234,7 @@ void print_volume(yajl_gen json_gen, char *buffer, const char *fmt, const char *
 
 #if defined(__OpenBSD__)
     int oclass_idx = -1, master_idx = -1, master_mute_idx = -1;
+    int master_next = AUDIO_MIXER_LAST;
     mixer_devinfo_t devinfo, devinfo2;
     mixer_ctrl_t vinfo;
 
@@ -228,12 +252,17 @@ void print_volume(yajl_gen json_gen, char *buffer, const char *fmt, const char *
 
     devinfo2.index = 0;
     while (ioctl(mixfd, AUDIO_MIXER_DEVINFO, &devinfo2) >= 0) {
-        if ((devinfo2.type == AUDIO_MIXER_VALUE) && (devinfo2.mixer_class == oclass_idx) && (strncmp(devinfo2.label.name, AudioNmaster, MAX_AUDIO_DEV_LEN) == 0))
+        if ((devinfo2.type == AUDIO_MIXER_VALUE) && (devinfo2.mixer_class == oclass_idx) && (strncmp(devinfo2.label.name, AudioNmaster, MAX_AUDIO_DEV_LEN) == 0)) {
             master_idx = devinfo2.index;
+            master_next = devinfo2.next;
+        }
 
         if ((devinfo2.type == AUDIO_MIXER_ENUM) && (devinfo2.mixer_class == oclass_idx) && (strncmp(devinfo2.label.name, AudioNmute, MAX_AUDIO_DEV_LEN) == 0))
-            master_mute_idx = devinfo2.index;
+            if (master_next == devinfo2.index)
+                master_mute_idx = devinfo2.index;
 
+        if (master_next != AUDIO_MIXER_LAST)
+            master_next = devinfo2.next;
         devinfo2.index++;
     }
 
@@ -246,6 +275,7 @@ void print_volume(yajl_gen json_gen, char *buffer, const char *fmt, const char *
 
     vinfo.dev = master_idx;
     vinfo.type = AUDIO_MIXER_VALUE;
+    vinfo.un.value.num_channels = devinfo.un.v.num_channels;
     if (ioctl(mixfd, AUDIO_MIXER_READ, &vinfo) == -1)
         goto out;
 
